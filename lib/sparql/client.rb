@@ -1,6 +1,7 @@
 require 'net/http/persistent' # @see https://rubygems.org/gems/net-http-persistent
 require 'rdf'                 # @see https://rubygems.org/gems/rdf
 require 'rdf/ntriples'        # @see https://rubygems.org/gems/rdf
+require 'net/http/digest_auth'
 begin
   require 'nokogiri'
 rescue LoadError
@@ -760,7 +761,7 @@ module SPARQL
     def logger=(logger)
       @logger.logger =  logger
       @logger.redis = @cache.redis_cache
-    end
+      end
 
     protected
 
@@ -801,6 +802,16 @@ module SPARQL
     # @return [Net::HTTPResponse]
     # @raise [IOError] if connection is closed
     # @see    https://www.w3.org/TR/sparql11-protocol/#query-operation
+    def authenticate_with_digest(request, uri)
+
+      http = Net::HTTP.new(uri.host, uri.port)
+      http.use_ssl = (uri.scheme == 'https')
+      digest_auth = Net::HTTP::DigestAuth.new
+      res = http.request_head(uri.request_uri)
+      auth_header = digest_auth.auth_header(uri, res['www-authenticate'], request.method)
+      request['Authorization'] = auth_header
+    end
+    
     def request(query, headers = {}, &block)
       # Make sure an appropriate Accept header is present
       headers['Accept'] ||= if (query.respond_to?(:expects_statements?) ?
@@ -811,18 +822,26 @@ module SPARQL
                               RESULT_ALL
                             end
       headers['User-Agent'] ||= "Ruby SPARQL::Client/#{SPARQL::Client::VERSION}"
-
+    
       request = send("make_#{request_method(query)}_request", query, headers)
-
-      request.basic_auth(url.user, url.password) if url.user && !url.user.empty?
-
+      
+      uri = URI.parse(url.to_s)
+      uri.user = LinkedData.settings["db_user"]
+      uri.password = LinkedData.settings["db_pass"]
+      use_digest_auth = LinkedData.settings["use_digest_auth"]
+      if use_digest_auth
+        authenticate_with_digest(request, uri)
+      else
+        request.basic_auth(url.user, url.password)
+      end
+    
       pre_http_hook(request) if respond_to?(:pre_http_hook)
-
+    
       raise IOError, "Client has been closed" unless @http
       response = @http.request(::URI.parse(url.to_s), request)
-
+    
       post_http_hook(response) if respond_to?(:post_http_hook)
-
+    
       10.times do
         if response.kind_of? Net::HTTPRedirection
           response = @http.request(::URI.parse(response['location']), request)
